@@ -13,12 +13,6 @@
 #include "gb.h"
 
 
-#ifdef GB_DISABLE_REWIND
-#define GB_rewind_reset(...)
-#define GB_rewind_push(...)
-#endif
-
-
 void GB_attributed_logv(GB_gameboy_t *gb, GB_log_attributes attributes, const char *fmt, va_list args)
 {
     char *string = NULL;
@@ -216,9 +210,6 @@ void GB_free(GB_gameboy_t *gb)
     }
 #ifndef GB_DISABLE_DEBUGGER
     GB_debugger_clear_symbols(gb);
-#endif
-    GB_rewind_reset(gb);
-#ifndef GB_DISABLE_CHEATS
     if (gb->breakpoints) {
         free(gb->breakpoints);
     }
@@ -231,6 +222,9 @@ void GB_free(GB_gameboy_t *gb)
     if (gb->undo_state) {
         free(gb->undo_state);
     }
+#endif
+    GB_rewind_reset(gb);
+#ifndef GB_DISABLE_CHEATS
     while (gb->cheats) {
         GB_remove_cheat(gb, gb->cheats[0]);
     }
@@ -1040,7 +1034,9 @@ void GB_load_battery_from_buffer(GB_gameboy_t *gb, const uint8_t *buffer, size_t
                                             really RTC data. */
         goto reset_rtc;
     }
+    GB_rtc_set_time(gb, time(NULL));
     goto exit;
+    
 reset_rtc:
     gb->last_rtc_second = time(NULL);
     gb->rtc_real.high |= 0x80; /* This gives the game a hint that the clock should be reset. */
@@ -1150,7 +1146,9 @@ void GB_load_battery(GB_gameboy_t *gb, const char *path)
                                             really RTC data. */
         goto reset_rtc;
     }
+    GB_rtc_set_time(gb, time(NULL));
     goto exit;
+    
 reset_rtc:
     gb->last_rtc_second = time(NULL);
     gb->rtc_real.high |= 0x80; /* This gives the game a hint that the clock should be reset. */
@@ -1791,6 +1789,7 @@ static void GB_reset_internal(GB_gameboy_t *gb, bool quick)
     
     gb->magic = GB_state_magic();
     request_boot_rom(gb);
+    GB_rewind_push(gb);
 }
 
 void GB_reset(GB_gameboy_t *gb)

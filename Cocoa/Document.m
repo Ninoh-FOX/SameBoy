@@ -13,6 +13,7 @@
 #import "GBPaletteEditorController.h"
 #import "GBObjectView.h"
 #import "GBPaletteView.h"
+#import "GBHexStatusBarRepresenter.h"
 #import "NSObject+DefaultsObserver.h"
 
 #define likely(x)   GB_likely(x)
@@ -82,6 +83,7 @@ enum model {
     
     NSString *_lastConsoleInput;
     HFLineCountingRepresenter *_lineRep;
+    GBHexStatusBarRepresenter *_statusRep;
     
     CVImageBufferRef _cameraImage;
     AVCaptureSession *_cameraSession;
@@ -123,6 +125,7 @@ enum model {
     void (^ volatile _pendingAtomicBlock)();
     
     NSDate *_fileModificationTime;
+    __weak NSThread *_emulationThread;
 }
 
 static void boot_rom_load(GB_gameboy_t *gb, GB_boot_rom_t type)
@@ -604,7 +607,9 @@ static unsigned *multiplication_table_for_frequency(unsigned frequency)
     }
     if (_running) return;
     _running = true;
-    [[[NSThread alloc] initWithTarget:self selector:@selector(run) object:nil] start];
+    NSThread *emulationThraed = [[NSThread alloc] initWithTarget:self selector:@selector(run) object:nil];
+    _emulationThread = emulationThraed;
+    [emulationThraed start];
 }
 
 - (void) stop
@@ -878,7 +883,9 @@ static unsigned *multiplication_table_for_frequency(unsigned frequency)
     HFStringEncodingTextRepresenter *asciiRep = [[HFStringEncodingTextRepresenter alloc] init];
     HFVerticalScrollerRepresenter *scrollRep = [[HFVerticalScrollerRepresenter alloc] init];
     _lineRep = [[HFLineCountingRepresenter alloc] init];
-    HFStatusBarRepresenter *statusRep = [[HFStatusBarRepresenter alloc] init];
+    _statusRep = [[GBHexStatusBarRepresenter alloc] init];
+    _statusRep.gb = &_gb;
+    _statusRep.bankForDescription = -1;
 
     _lineRep.lineNumberFormat = HFLineNumberFormatHexadecimal;
 
@@ -888,14 +895,14 @@ static unsigned *multiplication_table_for_frequency(unsigned frequency)
     [_hexController addRepresenter:asciiRep];
     [_hexController addRepresenter:scrollRep];
     [_hexController addRepresenter:_lineRep];
-    [_hexController addRepresenter:statusRep];
+    [_hexController addRepresenter:_statusRep];
 
     /* Tell the layout rep which reps it should lay out. */
     [layoutRep addRepresenter:hexRep];
     [layoutRep addRepresenter:scrollRep];
     [layoutRep addRepresenter:asciiRep];
     [layoutRep addRepresenter:_lineRep];
-    [layoutRep addRepresenter:statusRep];
+    [layoutRep addRepresenter:_statusRep];
 
 
     [(NSView *)[hexRep view] setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
@@ -1580,7 +1587,7 @@ static bool is_path_writeable(const char *path)
     GB_write_memory(&_gb, addr, value);
 }
 
-- (void) performAtomicBlock: (void (^)())block
+- (void)performAtomicBlock: (void (^)())block
 {
     while (!GB_is_inited(&_gb));
     bool isRunning = _running && !GB_debugger_is_stopped(&_gb);
@@ -1594,6 +1601,11 @@ static bool is_path_writeable(const char *path)
     
     if (_master) {
         [_master performAtomicBlock:block];
+        return;
+    }
+    
+    if ([NSThread currentThread] == _emulationThread) {
+        block();
         return;
     }
     
@@ -1721,8 +1733,48 @@ static bool is_path_writeable(const char *path)
 {
     NSString *error = [self captureOutputForBlock:^{
         uint16_t addr;
-        if (GB_debugger_evaluate(&_gb, [[sender stringValue] UTF8String], &addr, NULL)) {
+        uint16_t bank;
+        if (GB_debugger_evaluate(&_gb, [[sender stringValue] UTF8String], &addr, &bank)) {
             return;
+        }
+        
+        if (bank != (typeof(bank))-1) {
+            GB_memory_mode_t mode = [(GBMemoryByteArray *)(_hexController.byteArray) mode];
+            if (addr < 0x4000) {
+                if (bank == 0) {
+                    if (mode != GBMemoryROM && mode != GBMemoryEntireSpace) {
+                        mode = GBMemoryEntireSpace;
+                    }
+                }
+                else {
+                    addr |= 0x4000;
+                    mode = GBMemoryROM;
+                }
+            }
+            else if (addr < 0x8000) {
+                mode = GBMemoryROM;
+            }
+            else if (addr < 0xA000) {
+                mode = GBMemoryVRAM;
+            }
+            else if (addr < 0xC000) {
+                mode = GBMemoryExternalRAM;
+            }
+            else if (addr < 0xD000) {
+                if (mode != GBMemoryRAM && mode != GBMemoryEntireSpace) {
+                    mode = GBMemoryEntireSpace;
+                }
+            }
+            else if (addr < 0xE000) {
+                mode = GBMemoryRAM;
+            }
+            else {
+                mode = GBMemoryEntireSpace;
+            }
+            [_memorySpaceButton selectItemAtIndex:mode];
+            [self hexUpdateSpace:_memorySpaceButton.cell];
+            [_memoryBankInput setStringValue:[NSString stringWithFormat:@"$%02x", bank]];
+            [self hexUpdateBank:_memoryBankInput];
         }
         addr -= _lineRep.valueOffset;
         if (addr >= _hexController.byteArray.length) {
@@ -1787,6 +1839,7 @@ static bool is_path_writeable(const char *path)
 
         [sender setStringValue:[NSString stringWithFormat:@"$%x", bank]];
         [(GBMemoryByteArray *)(_hexController.byteArray) setSelectedBank:bank];
+        _statusRep.bankForDescription = bank;
         dispatch_async(dispatch_get_main_queue(), ^{
             [_hexController reloadData];
         });
@@ -1806,33 +1859,37 @@ static bool is_path_writeable(const char *path)
 - (IBAction)hexUpdateSpace:(NSPopUpButtonCell *)sender
 {
     self.memoryBankItem.enabled = [sender indexOfSelectedItem] != GBMemoryEntireSpace;
+    [_hexController setSelectedContentsRanges:@[[HFRangeWrapper withRange:HFRangeMake(0, 0)]]];
     GBMemoryByteArray *byteArray = (GBMemoryByteArray *)(_hexController.byteArray);
     [byteArray setMode:(GB_memory_mode_t)[sender indexOfSelectedItem]];
-    uint16_t bank;
+    uint16_t bank = -1;
     switch ((GB_memory_mode_t)[sender indexOfSelectedItem]) {
         case GBMemoryEntireSpace:
+            _statusRep.baseAddress = _lineRep.valueOffset = 0;
+            break;
         case GBMemoryROM:
-            _lineRep.valueOffset = 0;
+            _statusRep.baseAddress = _lineRep.valueOffset = 0;
             GB_get_direct_access(&_gb, GB_DIRECT_ACCESS_ROM, NULL, &bank);
-            byteArray.selectedBank = bank;
             break;
         case GBMemoryVRAM:
-            _lineRep.valueOffset = 0x8000;
+            _statusRep.baseAddress = _lineRep.valueOffset = 0x8000;
             GB_get_direct_access(&_gb, GB_DIRECT_ACCESS_VRAM, NULL, &bank);
-            byteArray.selectedBank = bank;
             break;
         case GBMemoryExternalRAM:
-            _lineRep.valueOffset = 0xA000;
+            _statusRep.baseAddress = _lineRep.valueOffset = 0xA000;
             GB_get_direct_access(&_gb, GB_DIRECT_ACCESS_CART_RAM, NULL, &bank);
-            byteArray.selectedBank = bank;
             break;
         case GBMemoryRAM:
-            _lineRep.valueOffset = 0xC000;
+            _statusRep.baseAddress = _lineRep.valueOffset = 0xC000;
             GB_get_direct_access(&_gb, GB_DIRECT_ACCESS_RAM, NULL, &bank);
-            byteArray.selectedBank = bank;
             break;
     }
-    [self.memoryBankInput setStringValue:[NSString stringWithFormat:@"$%x", byteArray.selectedBank]];
+    byteArray.selectedBank = bank;
+    _statusRep.bankForDescription = bank;
+    if (bank != (uint16_t)-1) {
+        [self.memoryBankInput setStringValue:[NSString stringWithFormat:@"$%x", byteArray.selectedBank]];
+    }
+    
     [_hexController reloadData];
     for (NSView *view in self.memoryView.subviews) {
         [view setNeedsDisplay:true];
@@ -2562,6 +2619,7 @@ static bool is_path_writeable(const char *path)
         self.debuggerNextButton.enabled = true;
         self.debuggerStepButton.enabled = true;
         self.debuggerFinishButton.enabled = true;
+        self.debuggerBackstepButton.enabled = true;
     }
     else {
         self.debuggerContinueButton.toolTip = self.debuggerContinueButton.title = @"Interrupt";
@@ -2575,6 +2633,7 @@ static bool is_path_writeable(const char *path)
         self.debuggerNextButton.enabled = false;
         self.debuggerStepButton.enabled = false;
         self.debuggerFinishButton.enabled = false;
+        self.debuggerBackstepButton.enabled = false;
     }
     if (updateContinue) {
         [self.debuggerContinueButton mouseEntered:nil];
