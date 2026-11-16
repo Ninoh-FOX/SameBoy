@@ -14,6 +14,10 @@
 #define AUDIO_FREQUENCY 48000
 #endif
 
+#ifndef RETRO_ENVIRONMENT_GET_TARGET_SAMPLE_RATE
+#define RETRO_ENVIRONMENT_GET_TARGET_SAMPLE_RATE (81 | RETRO_ENVIRONMENT_EXPERIMENTAL)
+#endif
+
 #ifdef _WIN32
 #include <direct.h>
 #include <windows.h>
@@ -102,6 +106,25 @@ static retro_log_printf_t log_cb;
 
 static retro_video_refresh_t video_cb;
 static retro_audio_sample_batch_t audio_batch_cb;
+
+/* Render audio directly at the frontend's output rate when it tells us
+   (avoids making the frontend resample 384 kHz down every frame). */
+static retro_environment_t environ_cb;
+static unsigned audio_rate;
+static unsigned get_audio_rate(void)
+{
+    if (!audio_rate) {
+        unsigned rate = 0;
+        if (environ_cb && environ_cb(RETRO_ENVIRONMENT_GET_TARGET_SAMPLE_RATE, &rate) &&
+            rate > 8000 && rate < 1024 * 1024) {
+            audio_rate = rate;
+        }
+        else {
+            audio_rate = AUDIO_FREQUENCY;
+        }
+    }
+    return audio_rate;
+}
 static retro_input_poll_t input_poll_cb;
 static retro_input_state_t input_state_cb;
 
@@ -680,7 +703,7 @@ static void init_for_current_model(unsigned id)
     GB_set_pixels_output(&gameboy[i],
                          (uint32_t *)(frame_buf + GB_get_screen_width(&gameboy[0]) * GB_get_screen_height(&gameboy[0]) * i));
     GB_set_rgb_encode_callback(&gameboy[i], rgb_encode);
-    GB_set_sample_rate(&gameboy[i], AUDIO_FREQUENCY);
+    GB_set_sample_rate(&gameboy[i], get_audio_rate());
     GB_apu_set_sample_callback(&gameboy[i], audio_callback);
     GB_set_rumble_callback(&gameboy[i], rumble_callback);
 
@@ -1302,7 +1325,7 @@ void retro_get_system_info(struct retro_system_info *info)
 void retro_get_system_av_info(struct retro_system_av_info *info)
 {
     struct retro_game_geometry geom;
-    struct retro_system_timing timing = { GB_get_usual_frame_rate(&gameboy[0]), AUDIO_FREQUENCY };
+    struct retro_system_timing timing = { GB_get_usual_frame_rate(&gameboy[0]), get_audio_rate() };
 
     if (emulated_devices == 2) {
         if (screen_layout == LAYOUT_TOP_DOWN) {

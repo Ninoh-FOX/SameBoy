@@ -78,6 +78,25 @@ else ifeq ($(platform), linux-portable)
    fpic := -fPIC -nostdlib
    SHARED := -shared -Wl,--version-script=$(CORE_DIR)/libretro/link.T
    LIBM :=   
+# Miyoo Mini / Mini Plus / Mini Flip (SigmaStar SSD202D, Cortex-A7)
+else ifeq ($(platform), miyoomini)
+   TARGET := $(TARGET_NAME)_libretro.so
+   fpic := -fPIC
+   SHARED := -shared -Wl,--version-script=$(CORE_DIR)/libretro/link.T -Wl,--no-undefined
+   CFLAGS += -mcpu=cortex-a7 -mtune=cortex-a7 -mfpu=neon-vfpv4 -mfloat-abi=hard -DMIYOOMINI
+   OPTFLAGS ?= -O2 -flto=4 -fuse-linker-plugin -fvisibility=hidden -fno-semantic-interposition -fno-stack-protector
+   # Profile-guided optimization with a profile recorded on a Miyoo Mini Plus
+   # (see libretro/pgo/miyoomini/README.md). PGO=generate builds the instrumented
+   # core, PGO=0 disables it. The profile must be re-recorded after code changes.
+   PGO_DIR := $(CORE_DIR)/libretro/pgo/miyoomini
+   ifeq ($(PGO), generate)
+      OPTFLAGS += -fprofile-generate=/tmp/pgo
+   else ifneq ($(PGO), 0)
+      ifneq ($(wildcard $(PGO_DIR)/obj),)
+         $(shell mkdir -p $(CORE_DIR)/build/obj && cp -a $(PGO_DIR)/obj/. $(CORE_DIR)/build/obj/)
+         OPTFLAGS += -fprofile-use -fprofile-correction
+      endif
+   endif
 # (armv7 a7, hard point, neon based) ### 
 # NESC, SNESC, C64 mini 
 else ifeq ($(platform),$(filter $(platform),classic_armv7_a7 unix-armv7-hardfloat-neon))
@@ -336,7 +355,9 @@ LDFLAGS += $(LIBM)
 ifeq ($(DEBUG), 1)
    CFLAGS += -O0 -g
 else
-   CFLAGS += -O2 -DNDEBUG
+   OPTFLAGS ?= -O2
+   CFLAGS += $(OPTFLAGS) -DNDEBUG
+   LDFLAGS += $(OPTFLAGS)
 endif
 
 include Makefile.common

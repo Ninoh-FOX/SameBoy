@@ -294,11 +294,11 @@ static void render(GB_gameboy_t *gb)
     }
 }
 
-static void update_square_sample(GB_gameboy_t *gb, unsigned index)
+static void update_square_sample_at(GB_gameboy_t *gb, unsigned index, unsigned cycles_offset)
 {
     if (gb->apu.square_channels[index].sample_surpressed) {
         if (gb->model > GB_MODEL_CGB_E) {
-            update_sample(gb, index, gb->apu.samples[index], 0);
+            update_sample(gb, index, gb->apu.samples[index], cycles_offset);
         }
         return;
     }
@@ -307,7 +307,12 @@ static void update_square_sample(GB_gameboy_t *gb, unsigned index)
     update_sample(gb, index,
                   duties[gb->apu.square_channels[index].current_sample_index + duty * 8]?
                   gb->apu.square_channels[index].current_volume : 0,
-                  0);
+                  cycles_offset);
+}
+
+static void update_square_sample(GB_gameboy_t *gb, unsigned index)
+{
+    update_square_sample_at(gb, index, 0);
 }
 
 static inline void update_wave_sample(GB_gameboy_t *gb, unsigned cycles)
@@ -621,6 +626,21 @@ static void step_lfsr(GB_gameboy_t *gb, unsigned cycles_offset)
 void GB_apu_run(GB_gameboy_t *gb, bool force)
 {
     uint32_t clock_rate = GB_get_clock_rate(gb) * 2;
+#ifdef MIYOOMINI
+    /* Batched APU: only step the channels when a sample is due, when something
+       that needs cycle accuracy is pending, or when forced (register reads and
+       writes, DIV events). An active wave channel does not need per-cycle
+       stepping; only the enabled-but-inactive "pulsed" case reads the address
+       bus and must stay cycle accurate. */
+    if (force ||
+        (gb->apu.apu_cycles > 0x1000) ||
+        (gb->apu_output.sample_cycles >= clock_rate) ||
+        (gb->apu.square_sweep_calculate_countdown || gb->apu.channel_1_restart_hold) ||
+        (gb->model <= GB_MODEL_CGB_E && (gb->apu.wave_channel.bugged_read_countdown ||
+                                         (gb->apu.wave_channel.enable && gb->apu.wave_channel.pulsed && !gb->apu.is_active[GB_WAVE])))) {
+        force = true;
+    }
+#else
     if (!force ||
         (gb->apu.apu_cycles > 0x1000) ||
         (gb->apu_output.sample_cycles >= clock_rate) ||
@@ -628,6 +648,7 @@ void GB_apu_run(GB_gameboy_t *gb, bool force)
         (gb->model <= GB_MODEL_CGB_E && (gb->apu.wave_channel.bugged_read_countdown || (gb->apu.wave_channel.enable && gb->apu.wave_channel.pulsed)))) {
         force = true;
     }
+#endif
     if (!force) {
         return;
     }
@@ -726,7 +747,12 @@ void GB_apu_run(GB_gameboy_t *gb, bool force)
                         gb->apu.pcm_mask[0] &= i == GB_SQUARE_1? 0xF0 : 0x0F;
                     }
                     gb->apu.square_channels[i].did_tick = true;
+#ifdef MIYOOMINI
+                    /* With batched stepping, place the transition where it happened */
+                    update_square_sample_at(gb, i, cycles - cycles_left);
+#else
                     update_square_sample(gb, i);
+#endif
                 }
                 if (cycles_left) {
                     gb->apu.square_channels[i].sample_countdown -= cycles_left;

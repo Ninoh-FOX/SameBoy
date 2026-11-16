@@ -115,11 +115,22 @@ void GB_timing_sync(GB_gameboy_t *gb)
 static void ir_run(GB_gameboy_t *gb, uint32_t cycles)
 {
     /* TODO: the way this thing works makes the CGB IR port behave inaccurately when used together with HUC1/3 IR ports*/
+    /* Fast path: sensor settled at 0, output already low, RP not sensing and no IR mapper.
+       Whatever path the code below takes, it would change nothing, so check the cheap fields first. */
+    if (likely(gb->ir_sensor == 0 && !gb->effective_ir_input &&
+               (gb->io_registers[GB_IO_RP] & 0xC0) != 0xC0 &&
+               gb->cartridge_type->mbc_type != GB_HUC1 && gb->cartridge_type->mbc_type != GB_HUC3)) return;
     if ((gb->model > GB_MODEL_CGB_E || !gb->cgb_mode) && gb->cartridge_type->mbc_type != GB_HUC1 && gb->cartridge_type->mbc_type != GB_HUC3) return;
     bool is_sensing = (gb->io_registers[GB_IO_RP] & 0xC0) == 0xC0 ||
                        (gb->cartridge_type->mbc_type == GB_HUC1 && gb->huc1.ir_mode) ||
                        (gb->cartridge_type->mbc_type == GB_HUC3 && gb->huc3.mode == 0xE);
-    if (is_sensing && (gb->infrared_input || gb->cart_ir || (gb->io_registers[GB_IO_RP] & 1))) {
+    /* Fast path: not sensing and the sensor already settled at 0. The general
+       code below would leave everything as is, so skip it. */
+    if (likely(!is_sensing && gb->ir_sensor == 0)) {
+        gb->effective_ir_input = false;
+        return;
+    }
+    if (is_sensing &&(gb->infrared_input || gb->cart_ir || (gb->io_registers[GB_IO_RP] & 1))) {
         gb->ir_sensor += cycles;
         if (gb->ir_sensor > IR_MAX) {
             gb->ir_sensor = IR_MAX;
@@ -422,7 +433,9 @@ void GB_advance_cycles(GB_gameboy_t *gb, uint8_t cycles)
         }
     }
     
+#ifndef GB_DISABLE_DEBUGGER
     gb->debugger_ticks += cycles;
+#endif
     
     if (gb->speed_switch_freeze) {
         if (gb->speed_switch_freeze >= cycles) {
@@ -437,7 +450,9 @@ void GB_advance_cycles(GB_gameboy_t *gb, uint8_t cycles)
         cycles <<= 1;
     }
     
+#ifndef GB_DISABLE_DEBUGGER
     gb->absolute_debugger_ticks += cycles;
+#endif
     
     // Not affected by speed boost
     if (likely(gb->io_registers[GB_IO_LCDC] & 0x80)) {
